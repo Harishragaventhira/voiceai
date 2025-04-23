@@ -3,30 +3,55 @@ from PIL import Image
 import sounddevice as sd
 from scipy.io.wavfile import write
 import os
-import time
+import pathlib
 from google import genai
 from google.genai import types
-from txtai import LLM, RAG, Embeddings
-from txtai.pipeline import Textractor
+from gtts import gTTS
+import pygame
 
 # === CONFIG ===
-client=genai.Client(api_key="AIzaSyBz7xWDWXbkyA5SRFOKE0VPm4m0Uifmf0c")  # Replace with your Gemini API Key
+client = genai.Client(api_key="AIzaSyBz7xWDWXbkyA5SRFOKE0VPm4m0Uifmf0c")  # Replace with your Gemini API Key
 MODEL = "gemini-1.5-flash"
 AUDIO_FILENAME = "recording.wav"
+TTS_AUDIO_FILE = "summary_audio.mp3"
+PDF_FILEPATH = pathlib.Path("Saveetha_Engineering_College.pdf")
+
+# Initialize pygame mixer
+pygame.mixer.init()
+is_paused = False
 
 # === AUDIO RECORDING ===
 def record_audio(duration=5, samplerate=44100):
     recording_label.configure(text="🔴 Recording...", text_color="red")
     app.update()
-    sd.default.device = None  # Let it choose the default input device
-    print("Default input device:", sd.default.device)
+    sd.default.device = None
     recording = sd.rec(int(duration * samplerate), samplerate=samplerate, channels=1)
     sd.wait()
     write(AUDIO_FILENAME, samplerate, recording)
     recording_label.configure(text="✅ Recording Complete", text_color="green")
     app.update()
 
-# === GEMINI TRANSCRIBE + CLEAN + RAG ===
+# === PLAY SUMMARY AUDIO ===
+def play_summary_audio():
+    global is_paused
+    if os.path.exists(TTS_AUDIO_FILE):
+        if is_paused:
+            pygame.mixer.music.unpause()
+            is_paused = False
+        else:
+            pygame.mixer.music.load(TTS_AUDIO_FILE)
+            pygame.mixer.music.play()
+    else:
+        print("Audio file not found.")
+
+# === PAUSE AUDIO ===
+def pause_summary_audio():
+    global is_paused
+    if pygame.mixer.music.get_busy():
+        pygame.mixer.music.pause()
+        is_paused = True
+
+# === GEMINI TRANSCRIBE + PDF SUMMARIZE ===
 def process_audio():
     text_generated_box.delete("0.0", "end")
     transcript_box.delete("0.0", "end")
@@ -34,47 +59,47 @@ def process_audio():
     with open(AUDIO_FILENAME, "rb") as f:
         audio_bytes = f.read()
 
-
     response = client.models.generate_content(
-        model='gemini-1.5-flash',
+        model=MODEL,
         contents=[
             "Transcript the audio clip",
-            types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav",)
+            types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")
         ]
     )
     transcript = response.text
-    print(transcript)
+    print("Transcript:", transcript)
 
-
-    # Run second refinement
     final = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model=MODEL,
         contents=transcript,
         config=types.GenerateContentConfig(
-            system_instruction="Replace any sentence with a version that focuses only on Saveetha Engineering College without changing the meaning."),
+            system_instruction="Replace any sentence with a version that focuses only on Saveetha Engineering College without changing the meaning.")
     )
     refined_text = final.text
-    print(refined_text)
+    print("Refined:", refined_text)
     transcript_box.insert("0.0", refined_text)
     transcript_box.update()
 
-    # Run through RAG
-    textractor = Textractor()
-    doc = textractor("Saveetha_Engineering_College.docx")
-    embeddings = Embeddings(content=True)
-    embeddings.index("Saveetha_Engineering_College.docx")
+    pdf_summary = client.models.generate_content(
+        model=MODEL,
+        contents=[
+            types.Part.from_bytes(
+                data=PDF_FILEPATH.read_bytes(),
+                mime_type='application/pdf',
+            ),
+            refined_text + " in simple 2-3 sentences"
+        ]
+    )
 
-    llm = LLM("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
-    rag = RAG(embeddings, llm, output="reference")
+    summary_text = pdf_summary.text
+    print("PDF Summary:", summary_text)
+    text_generated_box.insert("0.0", summary_text)
+    text_generated_box.update()
 
-    def prompt(question):
-        return [{
-            "query": question,
-            "question": f"Answer the following question using only the context below. Only include information specifically discussed.\n\nquestion: {question}\ncontext:\n"
-        }]
-
-    result = rag(prompt(refined_text), maxlength=4096, pad_token_id=32000)[0]
-    text_generated_box.insert("0.0", result["answer"])
+    # Generate TTS
+    tts = gTTS(text=summary_text, lang='en')
+    tts.save(TTS_AUDIO_FILE)
+    print("TTS audio saved.")
 
 # === GUI SETUP ===
 ctk.set_appearance_mode("dark")
@@ -128,5 +153,17 @@ transcript_box.place(x=20, y=165)
 
 speech_generated_label = ctk.CTkLabel(app, text="Speech Generated", font=("Jura", 14))
 speech_generated_label.place(x=20, y=300)
+
+play_button = ctk.CTkButton(app, font=("Jura", 14), text="▶ Play", width=120,
+                            fg_color="transparent", border_color="white",
+                            border_width=1, corner_radius=20, hover_color="white",
+                            command=play_summary_audio)
+play_button.place(x=150, y=300)
+
+pause_button = ctk.CTkButton(app, font=("Jura", 14), text="⏸ Pause", width=120,
+                             fg_color="transparent", border_color="white",
+                             border_width=1, corner_radius=20, hover_color="white",
+                             command=pause_summary_audio)
+pause_button.place(x=280, y=300)
 
 app.mainloop()
